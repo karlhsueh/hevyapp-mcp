@@ -6,5 +6,6 @@ services:
       - "3847:3847"
     environment:
       - HEVY_API_KEY=${HEVY_API_KEY}
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
       - MCP_TRANSPORT=sse
       - PORT=3847

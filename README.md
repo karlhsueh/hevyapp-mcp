@@ -15,14 +15,20 @@ git clone https://github.com/karlhsueh/hevyapp-mcp.git
 cd hevyapp-mcp
 ```
 
-### 2. Set your API key
-
-Get your key from [hevy.com/settings?developer](https://hevy.com/settings?developer) (requires Hevy Pro).
+### 2. Configure your credentials
 
 ```bash
 cp .env.example .env
-# Edit .env and set HEVY_API_KEY=your-key-here
 ```
+
+Edit `.env` and fill in:
+
+```
+HEVY_API_KEY=your-api-key-here   # from hevy.com/settings?developer (requires Hevy Pro)
+MCP_AUTH_TOKEN=your-secret-token  # generate one: openssl rand -hex 32
+```
+
+`MCP_AUTH_TOKEN` protects the server — any client must send `Authorization: Bearer <token>` to connect. If unset, the server starts unprotected (fine for local-only use).
 
 ### 3. Start the container
 
@@ -66,7 +72,10 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "hevy": {
       "type": "sse",
-      "url": "https://hevy-mcp.yourdomain.com/sse"
+      "url": "https://hevy-mcp.yourdomain.com/sse",
+      "headers": {
+        "Authorization": "Bearer your-secret-token"
+      }
     }
   }
 }
@@ -77,16 +86,18 @@ Restart Claude Desktop.
 ### Claude Code (CLI)
 
 ```bash
-claude mcp add hevy --transport sse https://hevy-mcp.yourdomain.com/sse
+claude mcp add hevy --transport sse https://hevy-mcp.yourdomain.com/sse \
+  --header "Authorization: Bearer your-secret-token"
 ```
 
 ### ChatGPT / other agents
 
-Point them at: `https://hevy-mcp.yourdomain.com/sse`
+URL: `https://hevy-mcp.yourdomain.com/sse`  
+Header: `Authorization: Bearer your-secret-token`
 
 ### Local agents (same machine)
 
-Skip the public URL and connect directly:
+Same token required, but use localhost directly to skip Cloudflare:
 
 ```
 http://localhost:3847/sse

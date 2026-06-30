@@ -450,13 +450,30 @@ const transport = process.env.MCP_TRANSPORT ?? "stdio";
 
 if (transport === "sse") {
   // HTTP + SSE transport — for remote access via Cloudflare tunnel
-  const port = parseInt(process.env.PORT ?? "3000", 10);
+  const port = parseInt(process.env.PORT ?? "3847", 10);
+  const authToken = process.env.MCP_AUTH_TOKEN;
+
+  if (!authToken) {
+    console.error("WARNING: MCP_AUTH_TOKEN is not set — server is unprotected");
+  }
+
+  function isAuthorized(req: http.IncomingMessage): boolean {
+    if (!authToken) return true; // no token configured, allow all (dev mode)
+    const header = req.headers["authorization"];
+    return header === `Bearer ${authToken}`;
+  }
+
+  function unauthorized(res: http.ServerResponse) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+  }
+
   const transports = new Map<string, SSEServerTransport>();
 
   const httpServer = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -465,6 +482,7 @@ if (transport === "sse") {
     }
 
     if (req.method === "GET" && req.url === "/sse") {
+      if (!isAuthorized(req)) { unauthorized(res); return; }
       const sseTransport = new SSEServerTransport("/message", res);
       transports.set(sseTransport.sessionId, sseTransport);
 
@@ -478,6 +496,7 @@ if (transport === "sse") {
     }
 
     if (req.method === "POST" && req.url?.startsWith("/message")) {
+      if (!isAuthorized(req)) { unauthorized(res); return; }
       const url = new URL(req.url, `http://localhost:${port}`);
       const sessionId = url.searchParams.get("sessionId");
       const sseTransport = sessionId ? transports.get(sessionId) : undefined;
