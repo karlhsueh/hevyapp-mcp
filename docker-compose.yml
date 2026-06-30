@@ -1,0 +1,10 @@
+services:
+  hevyapp-mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3847:3847"
+    environment:
+      - HEVY_API_KEY=${HEVY_API_KEY}
+      - MCP_TRANSPORT=sse
+      - PORT=3847
