@@ -602,8 +602,8 @@ if (mcpTransport === "sse") {
   const sseTransports = new Map<string, SSEServerTransport>();
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
 
-  // Streamable HTTP (Claude web/mobile connector)
-  app.all("/mcp", requireAuth, async (req: Request, res: Response) => {
+  // Streamable HTTP (Claude web/mobile connector) — handles both /mcp and / (root)
+  const mcpHandler = async (req: Request, res: Response) => {
     try {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -626,12 +626,16 @@ if (mcpTransport === "sse") {
         return;
       }
 
+      console.error(`MCP bad request: method=${req.method} sessionId=${req.headers["mcp-session-id"]} body=${JSON.stringify(req.body)}`);
       res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session or initialize request" }, id: null });
     } catch (err) {
-      console.error("MCP /mcp error:", err);
+      console.error("MCP error:", err);
       if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
     }
-  });
+  };
+
+  app.all("/mcp", requireAuth, mcpHandler);
+  app.all("/", requireAuth, mcpHandler);
 
   // Legacy SSE (Claude Desktop config / CLI)
   app.get("/sse", requireAuth, async (req: Request, res: Response) => {
