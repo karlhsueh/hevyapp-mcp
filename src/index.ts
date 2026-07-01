@@ -529,7 +529,7 @@ if (mcpTransport === "sse") {
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID");
     next();
   });
-  app.options("*", (_req, res) => { res.sendStatus(204); });
+  app.options("*path", (_req, res) => { res.sendStatus(204); });
 
   // --- OAuth discovery ---
   app.get("/.well-known/oauth-protected-resource", (_req, res) => {
