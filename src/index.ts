@@ -520,7 +520,7 @@ if (mcpTransport === "sse") {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use((req, _res, next) => {
-    console.error(`${req.method} ${req.path} auth=${req.headers["authorization"] ? "present" : "none"}`);
+    console.error(`[${new Date().toISOString()}] ${req.method} ${req.path} auth=${req.headers["authorization"] ? "present" : "none"}`);
     next();
   });
   app.use((_req, res, next) => {
