@@ -24,11 +24,12 @@ cp .env.example .env
 Edit `.env` and fill in:
 
 ```
-HEVY_API_KEY=your-api-key-here   # from hevy.com/settings?developer (requires Hevy Pro)
-MCP_AUTH_TOKEN=your-secret-token  # generate one: openssl rand -hex 32
+HEVY_API_KEY=your-api-key-here          # from hevy.com/settings?developer (requires Hevy Pro)
+MCP_AUTH_TOKEN=your-secret-token        # generate one: openssl rand -hex 32
+SERVER_BASE_URL=https://hevy-mcp.yourdomain.com  # your public URL (used for OAuth)
 ```
 
-`MCP_AUTH_TOKEN` protects the server — any client must send `Authorization: Bearer <token>` to connect. If unset, the server starts unprotected (fine for local-only use).
+`MCP_AUTH_TOKEN` protects the server. Clients authenticate via OAuth 2.0 (Claude web/mobile/desktop connector UI) or by passing the token directly as a Bearer header (Claude Desktop config / CLI). If unset, the server starts unprotected (fine for local-only use).
 
 ### 3. Start the container
 
@@ -63,7 +64,17 @@ Your MCP server will be live at `https://hevy-mcp.yourdomain.com/sse`.
 
 ## Connect to it
 
-### Claude Desktop
+### Claude web / mobile / desktop (connector UI) — OAuth
+
+The server implements OAuth 2.0, so Claude can authenticate without any config files.
+
+1. In Claude, open **Settings → Integrations** (web/mobile) or **Preferences → Integrations** (desktop)
+2. Click **Add custom connector** (or similar)
+3. Enter your server URL: `https://hevy-mcp.yourdomain.com`
+4. Claude will open a browser window — enter your `MCP_AUTH_TOKEN` in the login form
+5. You're connected. No config files, no bearer tokens to copy around.
+
+### Claude Desktop (config file)
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 

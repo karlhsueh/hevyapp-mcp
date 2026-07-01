@@ -9,3 +9,4 @@ services:
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
       - MCP_TRANSPORT=sse
       - PORT=3847
+      - SERVER_BASE_URL=${SERVER_BASE_URL}
