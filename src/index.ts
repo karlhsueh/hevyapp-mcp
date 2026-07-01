@@ -1,6 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -490,7 +491,9 @@ if (transport === "sse") {
 
   const serverBaseUrl = process.env.SERVER_BASE_URL ?? `http://localhost:${port}`;
 
-  const transports = new Map<string, SSEServerTransport>();
+  const sseTransports = new Map<string, SSEServerTransport>();
+  // Streamable HTTP sessions keyed by Mcp-Session-Id header
+  const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -714,13 +717,41 @@ if (transport === "sse") {
 
     // --- MCP endpoints ---
 
+    // Streamable HTTP transport — used by Claude web/mobile connector
+    if ((req.method === "GET" || req.method === "POST" || req.method === "DELETE") && pathname === "/mcp") {
+      if (!isAuthorized(req)) { unauthorized(res); return; }
+
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (req.method === "POST" && !sessionId) {
+        // New session — initialize
+        const streamTransport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+        });
+        streamTransport.onclose = () => {
+          if (streamTransport.sessionId) streamableTransports.delete(streamTransport.sessionId);
+        };
+        const server = createServer();
+        await server.connect(streamTransport);
+        await streamTransport.handleRequest(req, res);
+        if (streamTransport.sessionId) streamableTransports.set(streamTransport.sessionId, streamTransport);
+      } else if (sessionId && streamableTransports.has(sessionId)) {
+        await streamableTransports.get(sessionId)!.handleRequest(req, res);
+      } else {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid or missing session" }));
+      }
+      return;
+    }
+
+    // Legacy SSE transport
     if (req.method === "GET" && pathname === "/sse") {
       if (!isAuthorized(req)) { unauthorized(res); return; }
       const sseTransport = new SSEServerTransport("/message", res);
-      transports.set(sseTransport.sessionId, sseTransport);
+      sseTransports.set(sseTransport.sessionId, sseTransport);
 
       res.on("close", () => {
-        transports.delete(sseTransport.sessionId);
+        sseTransports.delete(sseTransport.sessionId);
       });
 
       const server = createServer();
@@ -731,7 +762,7 @@ if (transport === "sse") {
     if (req.method === "POST" && pathname === "/message") {
       if (!isAuthorized(req)) { unauthorized(res); return; }
       const sessionId = reqUrl.searchParams.get("sessionId");
-      const sseTransport = sessionId ? transports.get(sessionId) : undefined;
+      const sseTransport = sessionId ? sseTransports.get(sessionId) : undefined;
 
       if (!sseTransport) {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -746,6 +777,12 @@ if (transport === "sse") {
     if (req.method === "GET" && pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", server: "hevyapp-mcp" }));
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ server: "hevyapp-mcp", version: "1.0.0", mcp: true }));
       return;
     }
 
