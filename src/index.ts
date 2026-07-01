@@ -2,11 +2,12 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import http from "node:http";
+import express, { Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import { URL, URLSearchParams } from "node:url";
 import { HevyClient } from "./hevy-client.js";
@@ -449,190 +450,40 @@ function createServer() {
   return server;
 }
 
-const transport = process.env.MCP_TRANSPORT ?? "stdio";
+const mcpTransport = process.env.MCP_TRANSPORT ?? "stdio";
 
-if (transport === "sse") {
-  // HTTP + SSE transport — for remote access via Cloudflare tunnel
+if (mcpTransport === "sse") {
   const port = parseInt(process.env.PORT ?? "3847", 10);
   const authToken = process.env.MCP_AUTH_TOKEN;
+  const serverBaseUrl = process.env.SERVER_BASE_URL ?? `http://localhost:${port}`;
 
   if (!authToken) {
     console.error("WARNING: MCP_AUTH_TOKEN is not set — server is unprotected");
   }
 
-  // OAuth state: issued tokens and pending auth codes (in-memory, reset on restart)
+  // OAuth state (in-memory; resets on restart)
   const issuedTokens = new Set<string>();
   const authCodes = new Map<string, { redirectUri: string; clientId: string; expiresAt: number }>();
-  const registeredClients = new Map<string, { clientSecret: string }>();
 
-  function isAuthorized(req: http.IncomingMessage): boolean {
+  function checkBearer(req: Request): boolean {
     if (!authToken) return true;
-    const header = req.headers["authorization"];
-    if (!header) return false;
-    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-    if (!token) return false;
-    // Accept the static MCP_AUTH_TOKEN or any dynamically issued OAuth token
+    const header = req.headers["authorization"] ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     return token === authToken || issuedTokens.has(token);
   }
 
-  function unauthorized(res: http.ServerResponse) {
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Unauthorized" }));
+  function requireAuth(req: Request, res: Response, next: NextFunction) {
+    if (!checkBearer(req)) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    next();
   }
 
-  function readBody(req: http.IncomingMessage): Promise<string> {
-    return new Promise((resolve, reject) => {
-      let data = "";
-      req.on("data", (chunk) => (data += chunk));
-      req.on("end", () => resolve(data));
-      req.on("error", reject);
-    });
-  }
-
-  const serverBaseUrl = process.env.SERVER_BASE_URL ?? `http://localhost:${port}`;
-
-  const sseTransports = new Map<string, SSEServerTransport>();
-  // Streamable HTTP sessions keyed by Mcp-Session-Id header
-  const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
-
-  const httpServer = http.createServer(async (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version");
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    const reqUrl = new URL(req.url ?? "/", `http://localhost:${port}`);
-    const pathname = reqUrl.pathname;
-    console.error(`${req.method} ${pathname} auth=${req.headers["authorization"] ? "present" : "none"}`);
-
-    // --- OAuth 2.0 endpoints ---
-
-    // OAuth protected resource metadata (RFC 9728) — Claude checks this first
-    if (req.method === "GET" && pathname === "/.well-known/oauth-protected-resource") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        resource: serverBaseUrl,
-        authorization_servers: [serverBaseUrl],
-      }));
-      return;
-    }
-
-    // Authorization server metadata (RFC 8414)
-    if (req.method === "GET" && pathname === "/.well-known/oauth-authorization-server") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        issuer: serverBaseUrl,
-        authorization_endpoint: `${serverBaseUrl}/authorize`,
-        token_endpoint: `${serverBaseUrl}/token`,
-        registration_endpoint: `${serverBaseUrl}/register`,
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        code_challenge_methods_supported: ["S256"],
-      }));
-      return;
-    }
-
-    // Dynamic client registration (RFC 7591) — Claude registers itself here
-    if (req.method === "POST" && pathname === "/register") {
-      const body = await readBody(req);
-      let clientMeta: Record<string, unknown> = {};
-      try { clientMeta = JSON.parse(body); } catch { /* ignore */ }
-
-      const clientId = crypto.randomUUID();
-      const clientSecret = crypto.randomBytes(32).toString("hex");
-      registeredClients.set(clientId, { clientSecret });
-
-      res.writeHead(201, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        client_id: clientId,
-        client_secret: clientSecret,
-        client_id_issued_at: Math.floor(Date.now() / 1000),
-        redirect_uris: clientMeta.redirect_uris ?? [],
-        grant_types: ["authorization_code"],
-        response_types: ["code"],
-      }));
-      return;
-    }
-
-    // Authorization endpoint — shows a login form; user enters MCP_AUTH_TOKEN as password
-    if (req.method === "GET" && pathname === "/authorize") {
-      const clientId = reqUrl.searchParams.get("client_id") ?? "";
-      const redirectUri = reqUrl.searchParams.get("redirect_uri") ?? "";
-      const state = reqUrl.searchParams.get("state") ?? "";
-      const codeChallenge = reqUrl.searchParams.get("code_challenge") ?? "";
-      const codeChallengeMethod = reqUrl.searchParams.get("code_challenge_method") ?? "";
-
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(`<!DOCTYPE html>
+  const loginForm = (params: Record<string, string>, error = false) => `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hevy MCP — Authorize</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           background: #0f0f0f; color: #e0e0e0; display: flex;
-           align-items: center; justify-content: center; min-height: 100vh; }
-    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
-            padding: 2rem; width: 100%; max-width: 380px; }
-    h1 { font-size: 1.2rem; margin-bottom: 0.4rem; }
-    p  { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
-    label { display: block; font-size: 0.8rem; color: #aaa; margin-bottom: 0.3rem; }
-    input[type=password] { width: 100%; padding: 0.6rem 0.8rem; background: #111;
-           border: 1px solid #333; border-radius: 6px; color: #e0e0e0;
-           font-size: 0.95rem; margin-bottom: 1rem; }
-    button { width: 100%; padding: 0.7rem; background: #e34c26; border: none;
-             border-radius: 6px; color: #fff; font-size: 1rem; cursor: pointer; }
-    button:hover { background: #c43c1c; }
-    .error { color: #f87171; font-size: 0.85rem; margin-bottom: 1rem; display: none; }
-  </style>
-</head>
-<body>
-<div class="card">
-  <h1>Hevy MCP Server</h1>
-  <p>Enter your server token to grant access.</p>
-  <form method="POST" action="/authorize">
-    <input type="hidden" name="client_id" value="${clientId}">
-    <input type="hidden" name="redirect_uri" value="${redirectUri}">
-    <input type="hidden" name="state" value="${state}">
-    <input type="hidden" name="code_challenge" value="${codeChallenge}">
-    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
-    <label for="token">Server Token</label>
-    <input type="password" id="token" name="token" placeholder="Enter MCP_AUTH_TOKEN" autofocus>
-    <div class="error" id="err">Invalid token — try again.</div>
-    <button type="submit">Authorize</button>
-  </form>
-</div>
-</body>
-</html>`);
-      return;
-    }
-
-    // Authorization form submission
-    if (req.method === "POST" && pathname === "/authorize") {
-      const body = await readBody(req);
-      const params = new URLSearchParams(body);
-      const token = params.get("token") ?? "";
-      const redirectUri = params.get("redirect_uri") ?? "";
-      const state = params.get("state") ?? "";
-      const clientId = params.get("client_id") ?? "";
-      const codeChallenge = params.get("code_challenge") ?? "";
-      const codeChallengeMethod = params.get("code_challenge_method") ?? "";
-
-      if (!authToken || token !== authToken) {
-        // Re-render form with error
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hevy MCP — Authorize</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -650,165 +501,160 @@ if (transport === "sse") {
     button { width: 100%; padding: 0.7rem; background: #e34c26; border: none;
              border-radius: 6px; color: #fff; font-size: 1rem; cursor: pointer; margin-top: 1rem; }
     button:hover { background: #c43c1c; }
-    .error { color: #f87171; font-size: 0.85rem; margin-bottom: 0.5rem; }
+    .error { color: #f87171; font-size: 0.85rem; margin: 0.5rem 0; ${error ? "" : "display:none"} }
   </style>
 </head>
-<body>
-<div class="card">
+<body><div class="card">
   <h1>Hevy MCP Server</h1>
   <p>Enter your server token to grant access.</p>
   <form method="POST" action="/authorize">
-    <input type="hidden" name="client_id" value="${clientId}">
-    <input type="hidden" name="redirect_uri" value="${redirectUri}">
-    <input type="hidden" name="state" value="${state}">
-    <input type="hidden" name="code_challenge" value="${codeChallenge}">
-    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
+    ${Object.entries(params).map(([k, v]) => `<input type="hidden" name="${k}" value="${v}">`).join("\n    ")}
     <label for="token">Server Token</label>
     <input type="password" id="token" name="token" placeholder="Enter MCP_AUTH_TOKEN" autofocus>
     <div class="error">Invalid token — try again.</div>
     <button type="submit">Authorize</button>
   </form>
-</div>
-</body>
-</html>`);
-        return;
-      }
+</div></body></html>`;
 
-      // Token valid — issue an auth code and redirect
-      const code = crypto.randomBytes(32).toString("hex");
-      authCodes.set(code, {
-        redirectUri,
-        clientId,
-        expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
-      });
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+  app.use((req, _res, next) => {
+    console.error(`${req.method} ${req.path} auth=${req.headers["authorization"] ? "present" : "none"}`);
+    next();
+  });
+  app.use((_req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID");
+    next();
+  });
+  app.options("*", (_req, res) => { res.sendStatus(204); });
 
-      const redirectUrl = new URL(redirectUri);
-      redirectUrl.searchParams.set("code", code);
-      if (state) redirectUrl.searchParams.set("state", state);
-
-      res.writeHead(302, { Location: redirectUrl.toString() });
-      res.end();
-      return;
-    }
-
-    // Token endpoint — exchange auth code for access token
-    if (req.method === "POST" && pathname === "/token") {
-      const body = await readBody(req);
-      const params = new URLSearchParams(body);
-      const grantType = params.get("grant_type");
-      const code = params.get("code") ?? "";
-      const redirectUri = params.get("redirect_uri") ?? "";
-
-      if (grantType !== "authorization_code") {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "unsupported_grant_type" }));
-        return;
-      }
-
-      const codeData = authCodes.get(code);
-      if (!codeData || Date.now() > codeData.expiresAt || codeData.redirectUri !== redirectUri) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "invalid_grant" }));
-        return;
-      }
-
-      authCodes.delete(code); // codes are single-use
-
-      const accessToken = crypto.randomBytes(32).toString("hex");
-      issuedTokens.add(accessToken);
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        access_token: accessToken,
-        token_type: "Bearer",
-        scope: "mcp",
-      }));
-      return;
-    }
-
-    // --- MCP endpoints ---
-
-    // Streamable HTTP transport — Claude uses root path "/" or "/mcp"
-    if ((req.method === "GET" || req.method === "POST" || req.method === "DELETE") && (pathname === "/mcp" || pathname === "/")) {
-      if (!isAuthorized(req)) { unauthorized(res); return; }
-
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-      if (req.method === "POST" && !sessionId) {
-        // New session — initialize
-        const streamTransport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => crypto.randomUUID(),
-          onsessioninitialized: (sid) => {
-            streamableTransports.set(sid, streamTransport);
-          },
-        });
-        streamTransport.onclose = () => {
-          if (streamTransport.sessionId) streamableTransports.delete(streamTransport.sessionId);
-        };
-        const server = createServer();
-        await server.connect(streamTransport);
-        await streamTransport.handleRequest(req, res);
-      } else if (sessionId && streamableTransports.has(sessionId)) {
-        await streamableTransports.get(sessionId)!.handleRequest(req, res);
-      } else if (req.method === "GET" && !sessionId) {
-        // Claude may probe GET /mcp without a session to establish a notification stream
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Session ID required for GET" }));
-      } else {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid or missing session" }));
-      }
-      return;
-    }
-
-    // Legacy SSE transport
-    if (req.method === "GET" && pathname === "/sse") {
-      if (!isAuthorized(req)) { unauthorized(res); return; }
-      const sseTransport = new SSEServerTransport("/message", res);
-      sseTransports.set(sseTransport.sessionId, sseTransport);
-
-      res.on("close", () => {
-        sseTransports.delete(sseTransport.sessionId);
-      });
-
-      const server = createServer();
-      await server.connect(sseTransport);
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/message") {
-      if (!isAuthorized(req)) { unauthorized(res); return; }
-      const sessionId = reqUrl.searchParams.get("sessionId");
-      const sseTransport = sessionId ? sseTransports.get(sessionId) : undefined;
-
-      if (!sseTransport) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Session not found" }));
-        return;
-      }
-
-      await sseTransport.handlePostMessage(req, res);
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", server: "hevyapp-mcp" }));
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ server: "hevyapp-mcp", version: "1.0.0", mcp: true }));
-      return;
-    }
-
-    res.writeHead(404);
-    res.end("Not found");
+  // --- OAuth discovery ---
+  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+    res.json({ resource: serverBaseUrl, authorization_servers: [serverBaseUrl] });
   });
 
-  httpServer.listen(port, () => {
-    console.error(`Hevy MCP server running on http://0.0.0.0:${port}/sse`);
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+    res.json({
+      issuer: serverBaseUrl,
+      authorization_endpoint: `${serverBaseUrl}/authorize`,
+      token_endpoint: `${serverBaseUrl}/token`,
+      registration_endpoint: `${serverBaseUrl}/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256"],
+    });
+  });
+
+  // --- OAuth flow ---
+  app.post("/register", (req, res) => {
+    const clientId = crypto.randomUUID();
+    const clientSecret = crypto.randomBytes(32).toString("hex");
+    res.status(201).json({
+      client_id: clientId,
+      client_secret: clientSecret,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      redirect_uris: req.body?.redirect_uris ?? [],
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+    });
+  });
+
+  app.get("/authorize", (req, res) => {
+    const { client_id = "", redirect_uri = "", state = "", code_challenge = "", code_challenge_method = "" } = req.query as Record<string, string>;
+    res.send(loginForm({ client_id, redirect_uri, state, code_challenge, code_challenge_method }));
+  });
+
+  app.post("/authorize", (req, res) => {
+    const { token, redirect_uri, state, client_id, code_challenge, code_challenge_method } = req.body;
+    if (!authToken || token !== authToken) {
+      res.send(loginForm({ client_id, redirect_uri, state, code_challenge, code_challenge_method }, true));
+      return;
+    }
+    const code = crypto.randomBytes(32).toString("hex");
+    authCodes.set(code, { redirectUri: redirect_uri, clientId: client_id, expiresAt: Date.now() + 5 * 60 * 1000 });
+    const redirectUrl = new URL(redirect_uri);
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state);
+    res.redirect(redirectUrl.toString());
+  });
+
+  app.post("/token", (req, res) => {
+    const { grant_type, code, redirect_uri } = req.body;
+    if (grant_type !== "authorization_code") {
+      res.status(400).json({ error: "unsupported_grant_type" });
+      return;
+    }
+    const codeData = authCodes.get(code);
+    if (!codeData || Date.now() > codeData.expiresAt || codeData.redirectUri !== redirect_uri) {
+      res.status(400).json({ error: "invalid_grant" });
+      return;
+    }
+    authCodes.delete(code);
+    const accessToken = crypto.randomBytes(32).toString("hex");
+    issuedTokens.add(accessToken);
+    res.json({ access_token: accessToken, token_type: "Bearer", scope: "mcp" });
+  });
+
+  // --- MCP endpoints ---
+  const sseTransports = new Map<string, SSEServerTransport>();
+  const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
+
+  // Streamable HTTP (Claude web/mobile connector)
+  app.all("/mcp", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (sessionId && streamableTransports.has(sessionId)) {
+        await streamableTransports.get(sessionId)!.handleRequest(req, res, req.body);
+        return;
+      }
+
+      if (req.method === "POST" && isInitializeRequest(req.body)) {
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (sid) => { streamableTransports.set(sid, transport); },
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) streamableTransports.delete(transport.sessionId);
+        };
+        const server = createServer();
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        return;
+      }
+
+      res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session or initialize request" }, id: null });
+    } catch (err) {
+      console.error("MCP /mcp error:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Legacy SSE (Claude Desktop config / CLI)
+  app.get("/sse", requireAuth, async (req: Request, res: Response) => {
+    const transport = new SSEServerTransport("/message", res);
+    sseTransports.set(transport.sessionId, transport);
+    res.on("close", () => sseTransports.delete(transport.sessionId));
+    const server = createServer();
+    await server.connect(transport);
+  });
+
+  app.post("/message", requireAuth, async (req: Request, res: Response) => {
+    const sessionId = req.query["sessionId"] as string;
+    const transport = sseTransports.get(sessionId);
+    if (!transport) { res.status(404).json({ error: "Session not found" }); return; }
+    await transport.handlePostMessage(req, res, req.body);
+  });
+
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", server: "hevyapp-mcp" });
+  });
+
+  app.listen(port, () => {
+    console.error(`Hevy MCP server running on http://0.0.0.0:${port}`);
   });
 } else {
   // Default: stdio transport (local Claude Desktop / CLI use)
