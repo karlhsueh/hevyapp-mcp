@@ -508,6 +508,7 @@ if (transport === "sse") {
 
     const reqUrl = new URL(req.url ?? "/", `http://localhost:${port}`);
     const pathname = reqUrl.pathname;
+    console.error(`${req.method} ${pathname} auth=${req.headers["authorization"] ? "present" : "none"}`);
 
     // --- OAuth 2.0 endpoints ---
 
