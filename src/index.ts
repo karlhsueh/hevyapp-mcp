@@ -512,6 +512,16 @@ if (transport === "sse") {
 
     // --- OAuth 2.0 endpoints ---
 
+    // OAuth protected resource metadata (RFC 9728) — Claude checks this first
+    if (req.method === "GET" && pathname === "/.well-known/oauth-protected-resource") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        resource: serverBaseUrl,
+        authorization_servers: [serverBaseUrl],
+      }));
+      return;
+    }
+
     // Authorization server metadata (RFC 8414)
     if (req.method === "GET" && pathname === "/.well-known/oauth-authorization-server") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -718,8 +728,8 @@ if (transport === "sse") {
 
     // --- MCP endpoints ---
 
-    // Streamable HTTP transport — used by Claude web/mobile connector
-    if ((req.method === "GET" || req.method === "POST" || req.method === "DELETE") && pathname === "/mcp") {
+    // Streamable HTTP transport — Claude uses root path "/" or "/mcp"
+    if ((req.method === "GET" || req.method === "POST" || req.method === "DELETE") && (pathname === "/mcp" || pathname === "/")) {
       if (!isAuthorized(req)) { unauthorized(res); return; }
 
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
