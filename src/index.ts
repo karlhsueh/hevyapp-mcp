@@ -10,6 +10,8 @@ import {
 import express, { Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import { URL, URLSearchParams } from "node:url";
+import fs from "node:fs";
+import path from "node:path";
 import { HevyClient } from "./hevy-client.js";
 
 const apiKey = process.env.HEVY_API_KEY;
@@ -461,8 +463,26 @@ if (mcpTransport === "sse") {
     console.error("WARNING: MCP_AUTH_TOKEN is not set — server is unprotected");
   }
 
-  // OAuth state (in-memory; resets on restart)
-  const issuedTokens = new Set<string>();
+  // OAuth state — tokens persisted to disk so they survive container restarts
+  const tokensFile = path.join("/data", "issued-tokens.json");
+  function loadTokens(): Set<string> {
+    try {
+      fs.mkdirSync("/data", { recursive: true });
+      const raw = fs.readFileSync(tokensFile, "utf8");
+      return new Set(JSON.parse(raw));
+    } catch {
+      return new Set();
+    }
+  }
+  function saveTokens(tokens: Set<string>) {
+    try {
+      fs.mkdirSync("/data", { recursive: true });
+      fs.writeFileSync(tokensFile, JSON.stringify([...tokens]));
+    } catch (e) {
+      console.error("Failed to save tokens:", e);
+    }
+  }
+  const issuedTokens = loadTokens();
   const authCodes = new Map<string, { redirectUri: string; clientId: string; expiresAt: number }>();
 
   function checkBearer(req: Request): boolean {
@@ -595,6 +615,7 @@ if (mcpTransport === "sse") {
     authCodes.delete(code);
     const accessToken = crypto.randomBytes(32).toString("hex");
     issuedTokens.add(accessToken);
+    saveTokens(issuedTokens);
     res.json({ access_token: accessToken, token_type: "Bearer", scope: "mcp" });
   });
 

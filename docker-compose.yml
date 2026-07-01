@@ -10,3 +10,8 @@ services:
       - MCP_TRANSPORT=sse
       - PORT=3847
       - SERVER_BASE_URL=${SERVER_BASE_URL}
+    volumes:
+      - mcp-data:/data
+
+volumes:
+  mcp-data:
