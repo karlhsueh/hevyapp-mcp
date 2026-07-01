@@ -727,6 +727,9 @@ if (transport === "sse") {
         // New session — initialize
         const streamTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (sid) => {
+            streamableTransports.set(sid, streamTransport);
+          },
         });
         streamTransport.onclose = () => {
           if (streamTransport.sessionId) streamableTransports.delete(streamTransport.sessionId);
@@ -734,9 +737,12 @@ if (transport === "sse") {
         const server = createServer();
         await server.connect(streamTransport);
         await streamTransport.handleRequest(req, res);
-        if (streamTransport.sessionId) streamableTransports.set(streamTransport.sessionId, streamTransport);
       } else if (sessionId && streamableTransports.has(sessionId)) {
         await streamableTransports.get(sessionId)!.handleRequest(req, res);
+      } else if (req.method === "GET" && !sessionId) {
+        // Claude may probe GET /mcp without a session to establish a notification stream
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Session ID required for GET" }));
       } else {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Invalid or missing session" }));
