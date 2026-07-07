@@ -137,17 +137,6 @@ claude mcp add hevy --transport sse https://your-server/sse \
 
 ---
 
-## Optional: Sync workouts to Google Sheets
-
-The repo includes two n8n workflow files for syncing Hevy workouts to a Google Sheet — useful for giving Claude Projects static access to your full workout history without the MCP connector.
-
-- **`n8n-hevy-backfill.json`** — imports all historical workouts (clears the sheet first, then repopulates)
-- **`n8n-hevy-to-sheets.json`** — appends new workouts triggered by a Hevy webhook
-
-Import either file into your n8n instance and configure a Google Sheets credential and your Hevy API key in the HTTP Request nodes.
-
----
-
 ## Updating
 
 ```bash
