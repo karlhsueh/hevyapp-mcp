@@ -464,10 +464,11 @@ if (mcpTransport === "sse") {
   }
 
   // OAuth state — tokens persisted to disk so they survive container restarts
-  const tokensFile = path.join("/data", "issued-tokens.json");
+  const dataDir = process.env.DATA_DIR ?? "/data";
+  const tokensFile = path.join(dataDir, "issued-tokens.json");
   function loadTokens(): Set<string> {
     try {
-      fs.mkdirSync("/data", { recursive: true });
+      fs.mkdirSync(dataDir, { recursive: true });
       const raw = fs.readFileSync(tokensFile, "utf8");
       return new Set(JSON.parse(raw));
     } catch {
@@ -476,7 +477,7 @@ if (mcpTransport === "sse") {
   }
   function saveTokens(tokens: Set<string>) {
     try {
-      fs.mkdirSync("/data", { recursive: true });
+      fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(tokensFile, JSON.stringify([...tokens]));
     } catch (e) {
       console.error("Failed to save tokens:", e);
